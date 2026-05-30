@@ -36,7 +36,8 @@ static const char HANDLE_TEXT[] = "@whitphx";
 static const char URL_TEXT[]    = "https://whitphx.info/";
 
 static const int32_t MARGIN_X = 60;
-static const int32_t LOGO_GAP = 24;
+static const int32_t LOGO_GAP = 32;
+static const int32_t ICON_ROW_BOTTOM_MARGIN = 30;
 
 static uint8_t *framebuffer = NULL;
 
@@ -50,8 +51,10 @@ static void draw_nametag()
 {
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
 
+    // Pin the QR to the top-right so the icon row gets the full screen width
+    // along the bottom (the scaled icons no longer fit alongside the QR).
     int32_t qr_x = EPD_WIDTH - (int32_t)qrcode_width - MARGIN_X;
-    int32_t qr_y = (EPD_HEIGHT - (int32_t)qrcode_height) / 2;
+    int32_t qr_y = 60;
     draw_image_at(qr_x, qr_y, qrcode_width, qrcode_height, qrcode_data);
 
     int32_t text_x = MARGIN_X;
@@ -71,14 +74,26 @@ static void draw_nametag()
     cursor_y += FiraSans.advance_y + 20;
     writeln((GFXfont *)&FiraSans, URL_TEXT, &cursor_x, &cursor_y, framebuffer);
 
-    int32_t icon_y = EPD_HEIGHT - (int32_t)streamlit_logo_height - 50;
-    draw_image_at(text_x,
-                  icon_y,
+    // Icon row: the two logos have different bitmap heights (per-logo scale
+    // compensates for internal padding), so center-align them vertically
+    // around the row's midline.
+    int32_t icon_max_h = (int32_t)streamlit_logo_height > (int32_t)stlite_logo_height
+                             ? (int32_t)streamlit_logo_height
+                             : (int32_t)stlite_logo_height;
+    int32_t icon_row_center_y = EPD_HEIGHT - ICON_ROW_BOTTOM_MARGIN - icon_max_h / 2;
+
+    int32_t streamlit_x = MARGIN_X;
+    int32_t streamlit_y = icon_row_center_y - (int32_t)streamlit_logo_height / 2;
+    draw_image_at(streamlit_x,
+                  streamlit_y,
                   streamlit_logo_width,
                   streamlit_logo_height,
                   streamlit_logo_data);
-    draw_image_at(text_x + (int32_t)streamlit_logo_width + LOGO_GAP,
-                  icon_y,
+
+    int32_t stlite_x = streamlit_x + (int32_t)streamlit_logo_width + LOGO_GAP;
+    int32_t stlite_y = icon_row_center_y - (int32_t)stlite_logo_height / 2;
+    draw_image_at(stlite_x,
+                  stlite_y,
                   stlite_logo_width,
                   stlite_logo_height,
                   stlite_logo_data);

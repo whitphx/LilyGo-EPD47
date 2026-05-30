@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["qrcode>=7", "pillow>=10", "freetype-py>=2.4"]
+# dependencies = ["qrcode>=7", "pillow>=10", "freetype-py>=2.4", "resvg-py>=0.1"]
 # ///
 """Generate qrcode_data.h, name_font.h, and logo header files for the nametag example.
 
@@ -14,13 +14,16 @@ stlite.png into ./assets to swap the placeholder logos for the real ones.
 """
 
 import argparse
+import io
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import freetype
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import qrcode
 
 
@@ -83,22 +86,23 @@ def generate_qrcode(
     print(f"  qr     ({img.size[0]:>4}x{img.size[1]:<4}) {url!r} -> {output_path.name}")
 
 
-def generate_placeholder_logo(label: str, output_path: Path, name: str, size: int = 80) -> None:
-    img = Image.new("L", (size, size), 255)
+def generate_placeholder_logo(label: str, output_path: Path, name: str, height: int = 60) -> None:
+    width = height * 2
+    img = Image.new("L", (width, height), 255)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([0, 0, size - 1, size - 1], outline=0, width=2)
-    font = _load_bold_font(size // 2)
+    draw.rectangle([0, 0, width - 1, height - 1], outline=0, width=2)
+    font = _load_bold_font(height // 2)
     bbox = draw.textbbox((0, 0), label, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     draw.text(
-        ((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]),
+        ((width - tw) / 2 - bbox[0], (height - th) / 2 - bbox[1]),
         label,
         fill=0,
         font=font,
     )
     write_image_header(img, name, output_path)
-    print(f"  logo   ({size:>4}x{size:<4}) placeholder '{label}' -> {output_path.name}")
+    print(f"  logo   ({width:>4}x{height:<4}) placeholder '{label}' -> {output_path.name}")
 
 
 def _load_bold_font(size: int) -> ImageFont.ImageFont:
@@ -113,23 +117,119 @@ def _load_bold_font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def convert_png(input_path: Path, output_path: Path, name: str, max_size: int) -> None:
-    img = Image.open(input_path)
+def _rasterize_svg(input_path: Path, target_height: int) -> Image.Image:
+    # Rasterize well above the target height so the downscale stays sharp.
+    oversampled_h = target_height * 4
+
+    try:
+        import resvg_py
+    except ImportError:
+        resvg_py = None
+
+    if resvg_py is not None:
+        # resvg honors the SVG viewbox and preserves transparency, so the alpha
+        # bbox lines up with the real content. Pass svg_string (svg_path is
+        # currently broken upstream for nested files).
+        svg = input_path.read_text(encoding="utf-8")
+        png_bytes = bytes(resvg_py.svg_to_bytes(svg_string=svg, height=oversampled_h))
+        img = Image.open(io.BytesIO(png_bytes))
+    elif shutil.which("rsvg-convert"):
+        result = subprocess.run(
+            [shutil.which("rsvg-convert"), "-h", str(oversampled_h), str(input_path)],
+            capture_output=True, check=True,
+        )
+        img = Image.open(io.BytesIO(result.stdout))
+    elif shutil.which("qlmanage"):
+        # qlmanage writes "{input.name}.png" inside the output dir, always as
+        # a SIZE×SIZE thumbnail with a white background. It also tends to clip
+        # SVGs with off-viewport transforms — prefer resvg/rsvg-convert.
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run(
+                [shutil.which("qlmanage"), "-t", "-s", str(oversampled_h),
+                 "-o", td, str(input_path)],
+                capture_output=True, check=True,
+            )
+            png_path = Path(td) / f"{input_path.name}.png"
+            with Image.open(png_path) as raw:
+                img = raw.copy()
+    else:
+        raise SystemExit(
+            f"Cannot rasterize {input_path.name}: install resvg-py "
+            "(automatic via `uv run`) or rsvg-convert."
+        )
+
+    return _crop_to_content(img)
+
+
+def _crop_to_content(img: Image.Image) -> Image.Image:
+    full = (0, 0, *img.size)
+    bbox = None
     if img.mode in ("RGBA", "LA"):
+        alpha_bbox = img.split()[-1].getbbox()
+        # qlmanage paints alpha=255 everywhere, so a full-canvas alpha bbox
+        # means alpha is useless and we have to detect content by darkness.
+        if alpha_bbox and alpha_bbox != full:
+            bbox = alpha_bbox
+    if bbox is None:
+        bbox = ImageOps.invert(_flatten_to_grayscale(img)).getbbox()
+    return img.crop(bbox) if bbox and bbox != full else img
+
+
+def _load_logo_source(input_path: Path, target_height: int) -> Image.Image:
+    if input_path.suffix.lower() == ".svg":
+        return _rasterize_svg(input_path, target_height)
+    return Image.open(input_path)
+
+
+def _flatten_to_grayscale(img: Image.Image) -> Image.Image:
+    # Promote palette-with-transparency and grayscale-with-alpha to RGBA so the
+    # alpha channel survives the conversion to L.
+    if "transparency" in img.info or img.mode in ("P", "PA", "LA"):
+        img = img.convert("RGBA")
+    if img.mode == "RGBA":
         bg = Image.new("L", img.size, 255)
         bg.paste(img.convert("L"), mask=img.split()[-1])
-        img = bg
+        return bg
+    return img.convert("L")
+
+
+def _resize_to_height(img: Image.Image, target_height: int) -> Image.Image:
+    w, h = img.size
+    if h == target_height:
+        new_w = w
     else:
-        img = img.convert("L")
-    img.thumbnail((max_size, max_size), Image.LANCZOS)
+        new_w = max(2, round(w * target_height / h))
+    # EPD framebuffer packs two pixels per byte; even widths avoid a stray
+    # padding nibble per row.
+    if new_w % 2:
+        new_w += 1
+    return img.resize((new_w, target_height), Image.LANCZOS)
+
+
+def convert_logo(input_path: Path, output_path: Path, name: str, target_height: int) -> None:
+    img = _load_logo_source(input_path, target_height)
+    img = _flatten_to_grayscale(img)
+    img = _resize_to_height(img, target_height)
     write_image_header(img, name, output_path)
     print(f"  logo   ({img.size[0]:>4}x{img.size[1]:<4}) {input_path.name} -> {output_path.name}")
 
 
 LOGOS = [
-    ("streamlit_logo", "streamlit.png", "S"),
-    ("stlite_logo", "stlite.png", "L"),
+    # (header_name, stem in assets/, placeholder_label, scale_vs_base_height)
+    # Scales compensate for differing internal padding so the marks read at
+    # roughly the same visual height on the e-paper.
+    ("streamlit_logo", "streamlit", "S", 2.0),
+    ("stlite_logo",    "stlite",    "L", 1.2),
 ]
+LOGO_EXTENSIONS = (".png", ".svg")
+
+
+def find_logo_asset(assets_dir: Path, stem: str) -> Path | None:
+    for ext in LOGO_EXTENSIONS:
+        path = assets_dir / f"{stem}{ext}"
+        if path.is_file():
+            return path
+    return None
 
 BOLD_FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -192,7 +292,8 @@ def main() -> None:
     parser.add_argument("--url", default="https://whitphx.info/", help="URL encoded into the QR code.")
     parser.add_argument("--qr-box-size", type=int, default=8, help="Pixels per QR module.")
     parser.add_argument("--qr-border", type=int, default=2, help="Quiet-zone width in QR modules.")
-    parser.add_argument("--logo-size", type=int, default=80, help="Max edge length of each logo in pixels.")
+    parser.add_argument("--logo-height", type=int, default=60,
+                        help="Target height (px) for each logo. Width follows from source aspect ratio.")
     parser.add_argument("--assets-dir", type=Path, default=None, help="Where to look for real logo PNGs.")
     parser.add_argument("--out-dir", type=Path, default=None, help="Where to write the generated headers.")
     parser.add_argument("--name-text", default="Yuichiro Tachibana",
@@ -218,13 +319,14 @@ def main() -> None:
         border=args.qr_border,
     )
 
-    for header_name, png_name, placeholder_label in LOGOS:
-        png_path = assets_dir / png_name
+    for header_name, stem, placeholder_label, scale in LOGOS:
+        src_path = find_logo_asset(assets_dir, stem)
         h_path = out_dir / f"{header_name}.h"
-        if png_path.is_file():
-            convert_png(png_path, h_path, header_name, max_size=args.logo_size)
+        target_h = max(2, int(round(args.logo_height * scale)))
+        if src_path is not None:
+            convert_logo(src_path, h_path, header_name, target_height=target_h)
         else:
-            generate_placeholder_logo(placeholder_label, h_path, header_name, size=args.logo_size)
+            generate_placeholder_logo(placeholder_label, h_path, header_name, height=target_h)
 
     bold_font = find_bold_font(args.name_font)
     if bold_font is None:

@@ -46,12 +46,12 @@ Tunables:
 
 ### Project icons (Streamlit, stlite)
 
-Drop the real icon PNGs into `./assets/`:
+Drop assets named after each logo's stem into `./assets/`; PNG and SVG are both picked up:
 
 ```
 assets/
-  streamlit.png
-  stlite.png
+  streamlit.png   (or streamlit.svg)
+  stlite.png      (or stlite.svg)
 ```
 
 Then rerun:
@@ -60,9 +60,10 @@ Then rerun:
 uv run generate_assets.py
 ```
 
-This produces `streamlit_logo.h` and `stlite_logo.h`. Until you supply the PNGs, the script writes 80×80 boxed-letter placeholders so the layout is visible.
+This produces `streamlit_logo.h` and `stlite_logo.h`, resized to a uniform height (default 60 px) with width following the source aspect ratio. Until you supply the assets, the script writes labelled placeholders so the layout is still visible.
 
-Use `--logo-size N` to change the max edge length (default 80px).
+- `--logo-height N` — target height in pixels (default 60).
+- SVG inputs need either `rsvg-convert` (`brew install librsvg`) or macOS `qlmanage`. The script auto-detects and content-crops the rasterized output so SVG viewbox whitespace doesn't stretch the image.
 
 ### Name, handle, URL text
 
