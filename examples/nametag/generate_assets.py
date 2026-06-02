@@ -3,23 +3,26 @@
 # requires-python = ">=3.10"
 # dependencies = ["qrcode>=7", "pillow>=10", "freetype-py>=2.4", "resvg-py>=0.1"]
 # ///
-"""Generate qrcode_data.h, name_font.h, and logo header files for the nametag example.
+"""Generate QR, name-font, logo, and projects headers for the nametag example.
 
 Run with `uv` so the deps are fetched on the fly:
 
     uv run generate_assets.py
 
-To change the QR target or logo size, see --help. Drop streamlit.png /
-stlite.png into ./assets to swap the placeholder logos for the real ones.
+GitHub project metadata (stars, descriptions) is fetched from the public API
+at script time and baked into projects_data.h — no WiFi needed on the device.
 """
 
 import argparse
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import freetype
@@ -70,14 +73,26 @@ def generate_qrcode(
     url: str,
     output_path: Path,
     name: str = "qrcode",
-    box_size: int = 8,
+    box_size: int | None = None,
     border: int = 2,
+    target_px: int = 232,
+    ecc: str = "M",
 ) -> None:
+    error_correction = _ECC_LEVELS[ecc]
+    if box_size is None:
+        # Pick the largest integer box_size at which (modules + 2*border)*box_size
+        # stays within target_px, so QRs encoding different-length URLs end up
+        # close to the same width.
+        probe = qrcode.QRCode(
+            version=None, error_correction=error_correction, box_size=1, border=border,
+        )
+        probe.add_data(url)
+        probe.make(fit=True)
+        total_modules = probe.modules_count + 2 * border
+        box_size = max(2, target_px // total_modules)
+
     qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=box_size,
-        border=border,
+        version=None, error_correction=error_correction, box_size=box_size, border=border,
     )
     qr.add_data(url)
     qr.make(fit=True)
@@ -270,6 +285,106 @@ def find_bold_font(override: Path | None) -> Path | None:
     return None
 
 
+# --- GitHub project fetch ---------------------------------------------------
+
+QR_LINKS = [
+    # (ident_suffix, url, target_px, ecc)
+    # ECC "L" (7% error correction) lets the longer repo URLs fit in a smaller
+    # QR version, so per-project QRs end up at the same modules-count + box_size
+    # and therefore the same final width.
+    ("site",     "https://whitphx.info/",                       232, "M"),
+    ("github",   "https://github.com/whitphx",                  232, "M"),
+    ("linkedin", "https://www.linkedin.com/in/whitphx/",        232, "M"),
+    ("stlite",   "https://github.com/whitphx/stlite",           170, "L"),
+    ("webrtc",   "https://github.com/whitphx/streamlit-webrtc", 170, "L"),
+]
+
+_ECC_LEVELS = {
+    "L": qrcode.constants.ERROR_CORRECT_L,
+    "M": qrcode.constants.ERROR_CORRECT_M,
+    "Q": qrcode.constants.ERROR_CORRECT_Q,
+    "H": qrcode.constants.ERROR_CORRECT_H,
+}
+
+# Display name -> GitHub repo (owner/name). Descriptions are overridden here
+# so we don't depend on repo description text drifting.
+PROJECTS = [
+    ("Stlite",           "whitphx/stlite",           "In-browser Streamlit"),
+    ("Streamlit-WebRTC", "whitphx/streamlit-webrtc", "Real-time A/V on Streamlit"),
+]
+
+
+def _github_get(path: str) -> object:
+    req = urllib.request.Request(
+        f"https://api.github.com{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "nametag-generate-assets",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read())
+
+
+def _fetch_user_repos(user: str) -> list[dict]:
+    repos: list[dict] = []
+    page = 1
+    while True:
+        chunk = _github_get(f"/users/{user}/repos?per_page=100&page={page}")
+        if not chunk:
+            break
+        repos.extend(chunk)
+        if len(chunk) < 100:
+            break
+        page += 1
+    return repos
+
+
+def _format_stars(n: int) -> str:
+    if n >= 10000:
+        return f"{n // 1000}k"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+def gather_projects() -> list[dict]:
+    rows: list[dict] = []
+    for display, repo_path, desc in PROJECTS:
+        data = _github_get(f"/repos/{repo_path}")
+        rows.append({
+            "name": display,
+            "desc": desc,
+            "stars": _format_stars(data.get("stargazers_count", 0)),
+        })
+    return rows
+
+
+def write_projects_header(output_path: Path) -> None:
+    rows = gather_projects()
+
+    def esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    with output_path.open("w") as f:
+        f.write("#pragma once\n")
+        f.write("#include <stddef.h>\n\n")
+        f.write("struct ProjectRow {\n")
+        f.write("    const char* name;\n")
+        f.write("    const char* desc;\n")
+        f.write("    const char* stars;\n")
+        f.write("};\n\n")
+        f.write("const ProjectRow projects[] = {\n")
+        for r in rows:
+            f.write(f'    {{ "{esc(r["name"])}", "{esc(r["desc"])}", "{esc(r["stars"])}" }},\n')
+        f.write("};\n")
+        f.write(f"const size_t projects_count = {len(rows)};\n")
+
+    print(f"  proj  ({len(rows)} projects) -> {output_path.name}")
+    for r in rows:
+        print(f"          {r['name']:24} {r['stars']:>6}  {r['desc']}")
+
+
 def generate_font_header(font_path: Path, ident: str, size_pt: int, output_path: Path) -> None:
     script_dir = Path(__file__).resolve().parent
     # scripts/fontconvert.py lives at the repo root, two parents up from examples/nametag/.
@@ -289,8 +404,6 @@ def generate_font_header(font_path: Path, ident: str, size_pt: int, output_path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--url", default="https://whitphx.info/", help="URL encoded into the QR code.")
-    parser.add_argument("--qr-box-size", type=int, default=8, help="Pixels per QR module.")
     parser.add_argument("--qr-border", type=int, default=2, help="Quiet-zone width in QR modules.")
     parser.add_argument("--logo-height", type=int, default=60,
                         help="Target height (px) for each logo. Width follows from source aspect ratio.")
@@ -304,6 +417,8 @@ def main() -> None:
                         help="Override the auto-detected point size for the name font.")
     parser.add_argument("--name-max-width", type=int, default=568,
                         help="Pixel budget the name has to fit in (drives auto-sizing).")
+    parser.add_argument("--skip-github", action="store_true",
+                        help="Don't fetch GitHub data (keep the existing projects_data.h).")
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
@@ -312,12 +427,15 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Writing headers to {out_dir}")
-    generate_qrcode(
-        args.url,
-        out_dir / "qrcode_data.h",
-        box_size=args.qr_box_size,
-        border=args.qr_border,
-    )
+    for suffix, url, target_px, ecc in QR_LINKS:
+        generate_qrcode(
+            url,
+            out_dir / f"qrcode_{suffix}.h",
+            name=f"qrcode_{suffix}",
+            target_px=target_px,
+            border=args.qr_border,
+            ecc=ecc,
+        )
 
     for header_name, stem, placeholder_label, scale in LOGOS:
         src_path = find_logo_asset(assets_dir, stem)
@@ -327,6 +445,13 @@ def main() -> None:
             convert_logo(src_path, h_path, header_name, target_height=target_h)
         else:
             generate_placeholder_logo(placeholder_label, h_path, header_name, height=target_h)
+
+    if not args.skip_github:
+        try:
+            write_projects_header(out_dir / "projects_data.h")
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"  proj  skipped: GitHub fetch failed ({e}). Keep existing projects_data.h "
+                  "or rerun with network access.")
 
     bold_font = find_bold_font(args.name_font)
     if bold_font is None:
