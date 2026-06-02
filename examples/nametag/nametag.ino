@@ -45,7 +45,18 @@ static const int32_t MARGIN_Y_TOP = 60;
 static const int32_t LOGO_GAP = 32;
 static const int32_t ICON_ROW_BOTTOM_MARGIN = 30;
 
-static const uint8_t PAGE_COUNT = 3;
+static const uint8_t PAGE_COUNT = 4;
+
+// Topics for the "Ask me about" page. Areas of familiarity that aren't
+// projects in their own right — edit freely; the layout fits 4 entries
+// best (2x2 grid).
+static const char *const TOPICS[] = {
+    "Streamlit",
+    "Python",
+    "Pyodide",
+    "WebRTC",
+};
+static const size_t TOPICS_COUNT = sizeof(TOPICS) / sizeof(TOPICS[0]);
 
 // Per-project repo QR bitmaps, indexed in the same order as projects[] in
 // projects_data.h (Stlite, Streamlit-WebRTC).
@@ -164,7 +175,7 @@ static void draw_page_default()
 static void draw_page_projects()
 {
     int32_t y_top = MARGIN_Y_TOP;
-    y_top = draw_line(&NameFontBold, "Ask me about", MARGIN_X, y_top);
+    y_top = draw_line(&NameFontBold, "My projects", MARGIN_X, y_top);
     y_top += 20;
 
     // Each project row: bold name + indented "desc · N stars" on the left,
@@ -195,6 +206,28 @@ static void draw_page_projects()
         draw_image_at(qr_x, qr_y, qr_w, qr_h, PROJECT_QR_DATA[i]);
 
         y_top += row_h + row_gap;
+    }
+}
+
+
+// 2×2 grid of expertise topics. Each topic centered within its quadrant in
+// the bold name font, so the page reads as a tag cloud rather than a list.
+static void draw_page_topics()
+{
+    int32_t y_top = MARGIN_Y_TOP;
+    y_top = draw_line_centered(&NameFontBold, "Ask me about", EPD_WIDTH / 2, y_top);
+    y_top += 50;
+
+    const int32_t left_col_x  = EPD_WIDTH / 4;
+    const int32_t right_col_x = 3 * EPD_WIDTH / 4;
+    const int32_t row_pitch   = NameFontBold.advance_y + 70;
+
+    for (size_t i = 0; i < TOPICS_COUNT; i += 2) {
+        int32_t row_y = y_top + (int32_t)(i / 2) * row_pitch;
+        draw_line_centered(&NameFontBold, TOPICS[i], left_col_x, row_y);
+        if (i + 1 < TOPICS_COUNT) {
+            draw_line_centered(&NameFontBold, TOPICS[i + 1], right_col_x, row_y);
+        }
     }
 }
 
@@ -236,7 +269,8 @@ static void render_current_page()
     switch (page_index) {
     case 0: draw_page_default();  break;
     case 1: draw_page_projects(); break;
-    case 2: draw_page_connect();  break;
+    case 2: draw_page_topics();   break;
+    case 3: draw_page_connect();  break;
     default:
         page_index = 0;
         draw_page_default();
